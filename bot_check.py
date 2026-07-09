@@ -19,8 +19,8 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-CHAT_ID = os.environ["CHAT_ID"]
+TELEGRAM_TOKEN = os.environ["8513468878:AAE4ZElhslM9op4RnXvwprJ-5jUJ6jnkRac"]
+CHAT_ID = os.environ["191040827"]
 TEACHER_NAME = os.environ.get("TEACHER_NAME", "Ma.Fe")
 
 # ===== تایم‌زون‌ها - اگه فرض بالا درست نیست اینها رو عوض کن =====
