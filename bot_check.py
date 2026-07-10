@@ -1,15 +1,12 @@
 """
-بات کلاس - نسخه GitHub Actions (کاملا رایگان) - با پشتیبانی تایم‌زون
-----------------------------------------------------------------------
-فرض‌ها (اگه فرق میکنه، پایین همین فایل SCHEDULE_TIMEZONE رو عوض کن):
-- زمان‌هایی که توی سایت وارد میکنی (مثلا 6:00 PM) بر اساس تایم تهرانه.
-- پیام‌ها و زمان‌بندی ارسال، بر اساس تایم واقعی مانیل/فیلیپین (UTC+8) حساب و نمایش داده میشه.
+بات کلاس - نسخه GitHub Actions (کاملا رایگان) - با دکمه و پشتیبانی تایم‌زون
+------------------------------------------------------------------------------
+زمان‌هایی که توی سایت وارد میکنی، بر اساس تایم فیلیپین (Asia/Manila) در نظر گرفته میشه
+و پیام‌ها هم بر همون تایم نمایش داده میشن.
 
 این اسکریپت هر بار اجرا میشه:
-1. دستورهای جدید تلگرام (/today /tomorrow /next /week /start) رو جواب میده
-2. ۱۵ دقیقه قبل از هر کلاس (به وقت فیلیپین) و لحظه شروع کلاس، پیام میفرسته
-
-با GitHub Actions هر ۵ دقیقه اجرا میشه - نیازی به سرور دائمی نیست.
+1. پیام‌های جدید تلگرام رو چک میکنه، به دستورها یا دکمه‌های فشرده‌شده جواب میده
+2. ۱۵ دقیقه قبل از هر کلاس و لحظه شروع کلاس، پیام میفرسته
 """
 
 import json
@@ -23,9 +20,8 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 TEACHER_NAME = os.environ.get("TEACHER_NAME", "Ma.Fe")
 
-# ===== تایم‌زون‌ها - اگه فرض بالا درست نیست اینها رو عوض کن =====
 SCHEDULE_TIMEZONE = ZoneInfo("Asia/Manila")   # زمانی که توی سایت وارد میکنی بر این حساب میشه
-DISPLAY_TIMEZONE = ZoneInfo("Asia/Manila")    # پیام‌ها و لحظه ارسال بر این حساب میشه (تایم فیلیپین)
+DISPLAY_TIMEZONE = ZoneInfo("Asia/Manila")    # پیام‌ها و لحظه ارسال بر این حساب میشه
 
 PROJECT_ID = "tutor-schedule-90593"
 FIRESTORE_URL = f"https://firestore.googleapis.com/v1/projects/{PROJECT_ID}/databases/(default)/documents/sessions"
@@ -34,11 +30,29 @@ TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 DAYS_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
 
+# ===== دکمه‌های زیر کیبورد تلگرام =====
+BUTTON_LABELS = {
+    "📅 Today": "/today",
+    "📆 Tomorrow": "/tomorrow",
+    "🗓️ This Week": "/thisweek",
+    "📆 Next Week": "/nextweek",
+    "⏭️ Next Class": "/next",
+}
+KEYBOARD_LAYOUT = {
+    "keyboard": [
+        ["📅 Today", "📆 Tomorrow"],
+        ["🗓️ This Week", "📆 Next Week"],
+        ["⏭️ Next Class"],
+    ],
+    "resize_keyboard": True,
+    "one_time_keyboard": False,
+}
+KNOWN_COMMANDS = ("/start", "/today", "/tomorrow", "/next", "/thisweek", "/nextweek", "/week")
+
 
 # ===================== Firestore =====================
 
 def get_sessions():
-    """کلاس‌ها رو میگیره؛ datetime هر کدوم timezone-aware و بر اساس SCHEDULE_TIMEZONE ساخته میشه"""
     resp = requests.get(FIRESTORE_URL, timeout=15)
     resp.raise_for_status()
     data = resp.json()
@@ -57,7 +71,6 @@ def get_sessions():
             monday = datetime.strptime(week_start, "%Y-%m-%d")
             hour, minute = map(int, time_str.split(":"))
             session_date = monday + timedelta(days=DAYS_ORDER.index(day))
-            # زمان وارد شده در سایت رو به عنوان تایم تهران در نظر میگیریم
             session_dt = session_date.replace(
                 hour=hour, minute=minute, second=0, microsecond=0, tzinfo=SCHEDULE_TIMEZONE
             )
@@ -70,7 +83,7 @@ def get_sessions():
             "subject": fields.get("subject", {}).get("stringValue", "Class"),
             "grade": fields.get("grade", {}).get("stringValue", ""),
             "note": fields.get("note", {}).get("stringValue", ""),
-            "datetime": session_dt,  # timezone-aware, قابل مقایسه با هر ساعت دیگه
+            "datetime": session_dt,
         })
 
     sessions.sort(key=lambda s: s["datetime"])
@@ -78,7 +91,6 @@ def get_sessions():
 
 
 def local_dt(s):
-    """زمان کلاس رو به وقت فیلیپین (DISPLAY_TIMEZONE) تبدیل میکنه"""
     return s["datetime"].astimezone(DISPLAY_TIMEZONE)
 
 
@@ -90,7 +102,6 @@ def format_time_12h(dt):
 
 
 def greeting():
-    # ساعت رو بر اساس تایم فیلیپین حساب میکنیم چون پیام برای اونجاست
     hour = datetime.now(DISPLAY_TIMEZONE).hour
     if hour < 12:
         return f"Good morning, {TEACHER_NAME}!"
@@ -128,17 +139,35 @@ def started_message(s):
 
 # ===================== ارسال پیام =====================
 
-def send_message(chat_id, text):
-    requests.post(f"{TELEGRAM_API}/sendMessage", data={"chat_id": chat_id, "text": text}, timeout=15)
+def send_message(chat_id, text, with_keyboard=True):
+    data = {"chat_id": chat_id, "text": text}
+    if with_keyboard:
+        data["reply_markup"] = json.dumps(KEYBOARD_LAYOUT)
+    requests.post(f"{TELEGRAM_API}/sendMessage", data=data, timeout=15)
 
 
-# ===================== state (بین اجراها حفظ میشه) =====================
+def set_bot_commands():
+    """منوی اسلش تلگرام رو ثبت میکنه (وقتی / رو تایپ میکنی پیشنهاد میده)"""
+    commands = [
+        {"command": "today", "description": "Today's classes"},
+        {"command": "tomorrow", "description": "Tomorrow's classes"},
+        {"command": "thisweek", "description": "This week's schedule"},
+        {"command": "nextweek", "description": "Next week's schedule"},
+        {"command": "next", "description": "Your next class"},
+    ]
+    try:
+        requests.post(f"{TELEGRAM_API}/setMyCommands", json={"commands": commands}, timeout=15)
+    except Exception as e:
+        print(f"Could not set bot commands: {e}")
+
+
+# ===================== state =====================
 
 def load_state():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    return {"last_update_id": 0, "sent": {}}
+    return {"last_update_id": 0, "sent": {}, "commands_registered": False}
 
 
 def save_state(state):
@@ -148,6 +177,25 @@ def save_state(state):
 
 # ===================== دستورها =====================
 
+def build_week_text(title, monday, sessions):
+    sunday = monday + timedelta(days=6)
+    week_sessions = [s for s in sessions if monday <= local_dt(s).date() <= sunday]
+
+    if not week_sessions:
+        return f"🎉 No classes scheduled for {title.lower()}."
+
+    text = f"📆 {title}\n"
+    for day_offset in range(7):
+        day_date = monday + timedelta(days=day_offset)
+        day_sessions = [s for s in week_sessions if local_dt(s).date() == day_date]
+        if not day_sessions:
+            continue
+        text += f"\n{DAYS_ORDER[day_offset]} ({day_date.strftime('%b %d')}):\n"
+        for s in day_sessions:
+            text += f"  {session_line(s)}\n"
+    return text
+
+
 def handle_command(cmd, chat_id):
     sessions = get_sessions()
     now = datetime.now(DISPLAY_TIMEZONE)
@@ -155,11 +203,12 @@ def handle_command(cmd, chat_id):
     if cmd == "/start":
         send_message(chat_id,
             "👋 Hi! I track your tutoring schedule.\n\n"
-            "Commands:\n"
+            "Use the buttons below, or type a command:\n"
             "/today — today's classes\n"
             "/tomorrow — tomorrow's classes\n"
-            "/next — your next class\n"
-            "/week — this week's schedule\n\n"
+            "/thisweek — this week's schedule\n"
+            "/nextweek — next week's schedule\n"
+            "/next — your next class\n\n"
             "I'll also remind you automatically 15 minutes before each class."
         )
 
@@ -182,12 +231,13 @@ def handle_command(cmd, chat_id):
             send_message(chat_id, f"📅 Tomorrow's Classes\n\n{lines}")
 
     elif cmd == "/next":
-        upcoming = [s for s in sessions if s["datetime"] >= datetime.now(timezone.utc)]
+        now_utc = datetime.now(timezone.utc)
+        upcoming = [s for s in sessions if s["datetime"] >= now_utc]
         if not upcoming:
             send_message(chat_id, "🎉 No upcoming classes scheduled.")
         else:
             s = upcoming[0]
-            minutes_until = int((s["datetime"] - datetime.now(timezone.utc)).total_seconds() / 60)
+            minutes_until = int((s["datetime"] - now_utc).total_seconds() / 60)
             hours, mins = divmod(minutes_until, 60)
             countdown = f"{hours}h {mins}m" if hours else f"{mins}m"
             dt = local_dt(s)
@@ -200,24 +250,16 @@ def handle_command(cmd, chat_id):
                 f"⏳ Starts in: {countdown}"
             )
 
-    elif cmd == "/week":
+    elif cmd in ("/thisweek", "/week"):
         today = now.date()
         monday = today - timedelta(days=today.weekday())
-        sunday = monday + timedelta(days=6)
-        week_sessions = [s for s in sessions if monday <= local_dt(s).date() <= sunday]
-        if not week_sessions:
-            send_message(chat_id, "🎉 No classes scheduled this week.")
-        else:
-            text = "📆 This Week's Schedule\n"
-            for day_offset in range(7):
-                day_date = monday + timedelta(days=day_offset)
-                day_sessions = [s for s in week_sessions if local_dt(s).date() == day_date]
-                if not day_sessions:
-                    continue
-                text += f"\n{DAYS_ORDER[day_offset]} ({day_date.strftime('%b %d')}):\n"
-                for s in day_sessions:
-                    text += f"  {session_line(s)}\n"
-            send_message(chat_id, text)
+        send_message(chat_id, build_week_text("This Week's Schedule", monday, sessions))
+
+    elif cmd == "/nextweek":
+        today = now.date()
+        this_monday = today - timedelta(days=today.weekday())
+        next_monday = this_monday + timedelta(days=7)
+        send_message(chat_id, build_week_text("Next Week's Schedule", next_monday, sessions))
 
 
 def poll_commands(state):
@@ -236,8 +278,13 @@ def poll_commands(state):
             continue
         text = msg["text"].strip()
         chat_id = msg["chat"]["id"]
-        cmd = text.split()[0].lower()
-        if cmd in ("/start", "/today", "/tomorrow", "/next", "/week"):
+
+        # اول چک کن آیا متن یکی از دکمه‌هاست
+        cmd = BUTTON_LABELS.get(text)
+        if cmd is None:
+            cmd = text.split()[0].lower()
+
+        if cmd in KNOWN_COMMANDS:
             handle_command(cmd, chat_id)
 
 
@@ -259,13 +306,12 @@ def check_reminders(state):
         reminder_key = f"{s['id']}_reminder"
         started_key = f"{s['id']}_started"
 
-        # چون هر ۵ دقیقه چک میشه، بازه رو کمی باز گرفتیم تا چیزی جا نمونه
         if 12 <= minutes_until <= 17 and reminder_key not in sent:
-            send_message(CHAT_ID, reminder_message(s))
+            send_message(CHAT_ID, reminder_message(s), with_keyboard=False)
             sent[reminder_key] = today_str
 
         if -5 <= minutes_until <= 0 and started_key not in sent:
-            send_message(CHAT_ID, started_message(s))
+            send_message(CHAT_ID, started_message(s), with_keyboard=False)
             sent[started_key] = today_str
 
     state["sent"] = {k: v for k, v in sent.items() if v == today_str}
@@ -275,6 +321,11 @@ def check_reminders(state):
 
 def main():
     state = load_state()
+
+    if not state.get("commands_registered"):
+        set_bot_commands()
+        state["commands_registered"] = True
+
     poll_commands(state)
     check_reminders(state)
     save_state(state)
