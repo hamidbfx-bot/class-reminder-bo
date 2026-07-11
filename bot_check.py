@@ -53,8 +53,12 @@ KNOWN_COMMANDS = ("/start", "/today", "/tomorrow", "/next", "/thisweek", "/nextw
 # ===================== Firestore =====================
 
 def get_sessions():
-    resp = requests.get(FIRESTORE_URL, timeout=15)
-    resp.raise_for_status()
+    try:
+        resp = requests.get(FIRESTORE_URL, timeout=15)
+        resp.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        print(f"Could not fetch sessions (will try again next run): {e}")
+        return []
     data = resp.json()
 
     sessions = []
@@ -196,8 +200,7 @@ def build_week_text(title, monday, sessions):
     return text
 
 
-def handle_command(cmd, chat_id):
-    sessions = get_sessions()
+def handle_command(cmd, chat_id, sessions):
     now = datetime.now(DISPLAY_TIMEZONE)
 
     if cmd == "/start":
@@ -262,7 +265,7 @@ def handle_command(cmd, chat_id):
         send_message(chat_id, build_week_text("Next Week's Schedule", next_monday, sessions))
 
 
-def poll_commands(state):
+def poll_commands(state, sessions):
     resp = requests.get(
         f"{TELEGRAM_API}/getUpdates",
         params={"offset": state["last_update_id"] + 1, "timeout": 0},
@@ -285,19 +288,16 @@ def poll_commands(state):
             cmd = text.split()[0].lower()
 
         if cmd in KNOWN_COMMANDS:
-            handle_command(cmd, chat_id)
+            handle_command(cmd, chat_id, sessions)
 
 
 # ===================== یادآوری خودکار =====================
 
-def check_reminders(state):
+def check_reminders(state, sessions):
     now_utc = datetime.now(timezone.utc)
     today_str = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d")
 
-    try:
-        sessions = get_sessions()
-    except Exception as e:
-        print(f"Could not fetch sessions: {e}")
+    if not sessions:
         return
 
     sent = state["sent"]
@@ -326,8 +326,10 @@ def main():
         set_bot_commands()
         state["commands_registered"] = True
 
-    poll_commands(state)
-    check_reminders(state)
+    sessions = get_sessions()  # فقط یک‌بار در هر اجرا از Firestore میخونه
+
+    poll_commands(state, sessions)
+    check_reminders(state, sessions)
     save_state(state)
 
 
