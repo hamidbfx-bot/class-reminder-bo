@@ -56,12 +56,18 @@ KNOWN_COMMANDS = ("/start", "/today", "/tomorrow", "/next", "/thisweek", "/nextw
 # ===================== Firestore =====================
 
 def get_sessions():
-    try:
-        resp = requests.get(FIRESTORE_URL, timeout=15)
-        resp.raise_for_status()
-    except requests.exceptions.RequestException as e:
-        print(f"Could not fetch sessions (will try again next run): {e}")
-        return []
+    for attempt in range(2):
+        try:
+            resp = requests.get(FIRESTORE_URL, timeout=15)
+            resp.raise_for_status()
+            break
+        except requests.exceptions.RequestException as e:
+            print(f"Fetch attempt {attempt + 1} failed: {e}")
+            if attempt == 0:
+                import time
+                time.sleep(3)
+            else:
+                return None  # None = خطا (فرق داره با [] که یعنی واقعاً خالیه)
     data = resp.json()
 
     sessions = []
@@ -440,8 +446,15 @@ def cmd_addclass(chat_id, raw_text):
         send_message(chat_id, "❌ Couldn't save to the website (permission issue on the database). Let your admin check Firestore security rules.")
 
 
+DATA_COMMANDS = ("/today", "/tomorrow", "/next", "/thisweek", "/week", "/nextweek")
+
+
 def handle_command(cmd, chat_id, sessions, state, raw_text=""):
     now = datetime.now(DISPLAY_TIMEZONE)
+
+    if sessions is None and cmd in DATA_COMMANDS:
+        send_message(chat_id, "⚠️ I couldn't reach the class schedule right now (the database is temporarily busy). Please try again in a minute.")
+        return
 
     if cmd == "/start":
         send_message(chat_id,
