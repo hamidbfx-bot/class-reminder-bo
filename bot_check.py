@@ -18,6 +18,7 @@ import requests
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
+CHAT_IDS = [c.strip() for c in CHAT_ID.split(",") if c.strip()]
 TEACHER_NAME = os.environ.get("TEACHER_NAME", "Ma.Fe")
 
 SCHEDULE_TIMEZONE = ZoneInfo("Asia/Manila")   # زمانی که توی سایت وارد میکنی بر این حساب میشه
@@ -47,7 +48,7 @@ KEYBOARD_LAYOUT = {
     "resize_keyboard": True,
     "one_time_keyboard": False,
 }
-KNOWN_COMMANDS = ("/start", "/today", "/tomorrow", "/next", "/thisweek", "/nextweek", "/week")
+KNOWN_COMMANDS = ("/start", "/today", "/tomorrow", "/next", "/thisweek", "/nextweek", "/week", "/addclass", "/help")
 
 
 # ===================== Firestore =====================
@@ -92,6 +93,25 @@ def get_sessions():
 
     sessions.sort(key=lambda s: s["datetime"])
     return sessions
+
+
+def add_session_to_firestore(day, time_str, student, subject, grade, week_start):
+    body = {
+        "fields": {
+            "day": {"stringValue": day},
+            "time": {"stringValue": time_str},
+            "student": {"stringValue": student},
+            "subject": {"stringValue": subject},
+            "grade": {"stringValue": grade},
+            "weekStart": {"stringValue": week_start},
+            "note": {"stringValue": ""},
+        }
+    }
+    try:
+        resp = requests.post(FIRESTORE_URL, json=body, timeout=15)
+        return resp.status_code in (200, 201), resp.text
+    except requests.exceptions.RequestException as e:
+        return False, str(e)
 
 
 def local_dt(s):
@@ -158,6 +178,8 @@ def set_bot_commands():
         {"command": "thisweek", "description": "This week's schedule"},
         {"command": "nextweek", "description": "Next week's schedule"},
         {"command": "next", "description": "Your next class"},
+        {"command": "addclass", "description": "Add a new class"},
+        {"command": "help", "description": "How to use this bot"},
     ]
     try:
         requests.post(f"{TELEGRAM_API}/setMyCommands", json={"commands": commands}, timeout=15)
@@ -200,7 +222,69 @@ def build_week_text(title, monday, sessions):
     return text
 
 
-def handle_command(cmd, chat_id, sessions):
+def cmd_addclass(chat_id, raw_text):
+    args = raw_text[len("/addclass"):].strip()
+
+    usage = (
+        "⚠️ Wrong format. Use:\n"
+        "/addclass Day HH:MM Student | Subject | Grade\n\n"
+        "Example:\n"
+        "/addclass Monday 18:00 Sophia | Math | Grade 7\n\n"
+        "Add 'next' before the day to schedule it for next week:\n"
+        "/addclass next Monday 18:00 Sophia | Math | Grade 7\n\n"
+        "Note: time must be 24-hour format (e.g. 18:00 for 6 PM)."
+    )
+
+    if not args:
+        send_message(chat_id, usage)
+        return
+
+    next_week = False
+    if args.lower().startswith("next "):
+        next_week = True
+        args = args[5:].strip()
+
+    parts = args.split(None, 2)
+    if len(parts) < 3:
+        send_message(chat_id, usage)
+        return
+
+    day_raw, time_raw, rest = parts
+    day = day_raw.capitalize()
+    if day not in DAYS_ORDER:
+        send_message(chat_id, f"⚠️ Day '{day_raw}' not recognized. Use full names: Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday.")
+        return
+
+    try:
+        datetime.strptime(time_raw, "%H:%M")
+    except ValueError:
+        send_message(chat_id, "⚠️ Time must be in 24-hour format, like 18:00 for 6 PM.")
+        return
+
+    fields = [p.strip() for p in rest.split("|")]
+    student = fields[0] if len(fields) > 0 else ""
+    subject = fields[1] if len(fields) > 1 else ""
+    grade = fields[2] if len(fields) > 2 else ""
+
+    if not student:
+        send_message(chat_id, usage)
+        return
+
+    today = datetime.now(DISPLAY_TIMEZONE).date()
+    monday = today - timedelta(days=today.weekday())
+    if next_week:
+        monday += timedelta(days=7)
+    week_start = monday.strftime("%Y-%m-%d")
+
+    ok, info = add_session_to_firestore(day, time_raw, student, subject, grade, week_start)
+    if ok:
+        send_message(chat_id, f"✅ Added: {student} — {subject} ({grade})\n{day} at {time_raw}")
+    else:
+        print(f"Firestore write failed: {info}")
+        send_message(chat_id, "❌ Couldn't save to the website (permission issue on the database). Let your admin check Firestore security rules.")
+
+
+def handle_command(cmd, chat_id, sessions, raw_text=""):
     now = datetime.now(DISPLAY_TIMEZONE)
 
     if cmd == "/start":
@@ -211,7 +295,9 @@ def handle_command(cmd, chat_id, sessions):
             "/tomorrow — tomorrow's classes\n"
             "/thisweek — this week's schedule\n"
             "/nextweek — next week's schedule\n"
-            "/next — your next class\n\n"
+            "/next — your next class\n"
+            "/addclass — add a new class\n"
+            "/help — full usage guide\n\n"
             "I'll also remind you automatically 15 minutes before each class."
         )
 
@@ -265,6 +351,38 @@ def handle_command(cmd, chat_id, sessions):
         send_message(chat_id, build_week_text("Next Week's Schedule", next_monday, sessions))
 
 
+    elif cmd == "/help":
+        send_message(chat_id,
+            "📖 How to Use This Bot\n\n"
+            "🔘 Buttons (tap below):\n"
+            "📅 Today — today's classes\n"
+            "📆 Tomorrow — tomorrow's classes\n"
+            "🗓️ This Week — this week's full schedule\n"
+            "📆 Next Week — next week's full schedule\n"
+            "⏭️ Next Class — your very next upcoming class\n\n"
+            "⌨️ Commands (type manually):\n"
+            "/today\n"
+            "/tomorrow\n"
+            "/thisweek\n"
+            "/nextweek\n"
+            "/next\n"
+            "/addclass — add a new class to the schedule\n\n"
+            "➕ Adding a class:\n"
+            "/addclass Day HH:MM Student | Subject | Grade\n\n"
+            "Example:\n"
+            "/addclass Monday 18:00 Sophia | Math | Grade 7\n\n"
+            "To schedule it for next week instead, add 'next' before the day:\n"
+            "/addclass next Monday 18:00 Sophia | Math | Grade 7\n\n"
+            "⚠️ Time must be 24-hour format (e.g. 18:00 = 6:00 PM).\n"
+            "⚠️ Day must be spelled out fully: Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday.\n\n"
+            "🔔 Automatic reminders:\n"
+            "You'll get a message 15 minutes before each class, and another one when it starts — no need to do anything."
+        )
+
+    elif cmd == "/addclass":
+        cmd_addclass(chat_id, raw_text)
+
+
 def poll_commands(state, sessions):
     resp = requests.get(
         f"{TELEGRAM_API}/getUpdates",
@@ -288,7 +406,7 @@ def poll_commands(state, sessions):
             cmd = text.split()[0].lower()
 
         if cmd in KNOWN_COMMANDS:
-            handle_command(cmd, chat_id, sessions)
+            handle_command(cmd, chat_id, sessions, raw_text=text)
 
 
 # ===================== یادآوری خودکار =====================
@@ -307,11 +425,13 @@ def check_reminders(state, sessions):
         started_key = f"{s['id']}_started"
 
         if 12 <= minutes_until <= 17 and reminder_key not in sent:
-            send_message(CHAT_ID, reminder_message(s), with_keyboard=False)
+            for recipient in CHAT_IDS:
+                send_message(recipient, reminder_message(s), with_keyboard=False)
             sent[reminder_key] = today_str
 
         if -5 <= minutes_until <= 0 and started_key not in sent:
-            send_message(CHAT_ID, started_message(s), with_keyboard=False)
+            for recipient in CHAT_IDS:
+                send_message(recipient, started_message(s), with_keyboard=False)
             sent[started_key] = today_str
 
     state["sent"] = {k: v for k, v in sent.items() if v == today_str}
