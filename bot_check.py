@@ -38,12 +38,14 @@ BUTTON_LABELS = {
     "🗓️ This Week": "/thisweek",
     "📆 Next Week": "/nextweek",
     "⏭️ Next Class": "/next",
+    "➕ Add Math Class": "/addclass",
 }
 KEYBOARD_LAYOUT = {
     "keyboard": [
         ["📅 Today", "📆 Tomorrow"],
         ["🗓️ This Week", "📆 Next Week"],
         ["⏭️ Next Class"],
+        ["➕ Add Math Class"],
     ],
     "resize_keyboard": True,
     "one_time_keyboard": False,
@@ -192,8 +194,10 @@ def set_bot_commands():
 def load_state():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {"last_update_id": 0, "sent": {}, "commands_registered": False}
+            state = json.load(f)
+            state.setdefault("conversations", {})
+            return state
+    return {"last_update_id": 0, "sent": {}, "commands_registered": False, "conversations": {}}
 
 
 def save_state(state):
@@ -220,6 +224,158 @@ def build_week_text(title, monday, sessions):
         for s in day_sessions:
             text += f"  {session_line(s)}\n"
     return text
+
+
+def parse_day_date(text):
+    """قبول میکنه: اسم روز تنها ('Monday')، یا تاریخ کامل ('July 20', '2026-07-20', '20/07')"""
+    text = text.strip()
+    now = datetime.now(DISPLAY_TIMEZONE)
+    today = now.date()
+
+    weekday_lookup = {d.lower(): d for d in DAYS_ORDER}
+    if text.lower() in weekday_lookup:
+        day_name = weekday_lookup[text.lower()]
+        target_weekday = DAYS_ORDER.index(day_name)
+        days_ahead = (target_weekday - today.weekday()) % 7
+        target_date = today + timedelta(days=days_ahead)
+        monday = target_date - timedelta(days=target_date.weekday())
+        return day_name, monday.strftime("%Y-%m-%d")
+
+    formats_with_year = ["%Y-%m-%d", "%d/%m/%Y", "%B %d %Y", "%b %d %Y", "%A %B %d %Y"]
+    formats_without_year = ["%d/%m", "%B %d", "%b %d", "%A %B %d", "%A %b %d"]
+
+    for fmt in formats_with_year:
+        try:
+            dt = datetime.strptime(text, fmt)
+            target_date = dt.date()
+            day_name = DAYS_ORDER[target_date.weekday()]
+            monday = target_date - timedelta(days=target_date.weekday())
+            return day_name, monday.strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+
+    for fmt in formats_without_year:
+        try:
+            dt = datetime.strptime(text, fmt)
+            target_date = dt.date().replace(year=now.year)
+            if target_date < today:
+                target_date = target_date.replace(year=now.year + 1)
+            day_name = DAYS_ORDER[target_date.weekday()]
+            monday = target_date - timedelta(days=target_date.weekday())
+            return day_name, monday.strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+
+    return None
+
+
+def parse_time_flexible(text):
+    """قبول میکنه: '18:00' یا '6:00 PM' یا '6:00PM' و به فرمت 24 ساعته برمیگردونه"""
+    text = text.strip()
+    for fmt in ("%H:%M", "%I:%M %p", "%I:%M%p", "%I %p", "%I%p"):
+        try:
+            t = datetime.strptime(text, fmt)
+            return t.strftime("%H:%M")
+        except ValueError:
+            continue
+    return None
+
+
+def start_addclass_wizard(chat_id, state):
+    state["conversations"][str(chat_id)] = {"step": "day", "data": {}}
+    send_message(
+        chat_id,
+        "➕ Let's add a new Math class!\n\n"
+        "📅 What day and date is the class?\n"
+        "(e.g. 'Monday', 'July 20', or '2026-07-20')\n\n"
+        "Type /cancel anytime to stop.",
+        with_keyboard=False,
+    )
+
+
+def process_wizard_message(chat_id, text, state):
+    """اگه این چت وسط یه گفتگوی چندمرحله‌ایه، پیام رو پردازش میکنه. برمیگردونه True اگه پردازش کرد."""
+    key = str(chat_id)
+    conv = state["conversations"].get(key)
+    if not conv:
+        return False
+
+    if text.strip().lower() == "/cancel":
+        del state["conversations"][key]
+        send_message(chat_id, "❌ Cancelled. No class was added.")
+        return True
+
+    step = conv["step"]
+
+    if step == "day":
+        parsed = parse_day_date(text.strip())
+        if parsed is None:
+            send_message(
+                chat_id,
+                "⚠️ I couldn't understand that date. Try 'Monday', 'July 20', or '2026-07-20'.\n\n"
+                "📅 What day and date is the class?",
+                with_keyboard=False,
+            )
+            return True
+        day_name, week_start = parsed
+        conv["data"]["day"] = day_name
+        conv["data"]["weekStart"] = week_start
+        conv["step"] = "time"
+        send_message(
+            chat_id,
+            f"Got it — {day_name} ({week_start}). ✅\n\n"
+            "🕕 What time does the class start?\n(e.g. '18:00' or '6:00 PM')",
+            with_keyboard=False,
+        )
+        return True
+
+    if step == "time":
+        time_24 = parse_time_flexible(text.strip())
+        if time_24 is None:
+            send_message(
+                chat_id,
+                "⚠️ I couldn't understand that time. Try '18:00' or '6:00 PM'.\n\n"
+                "🕕 What time does the class start?",
+                with_keyboard=False,
+            )
+            return True
+        conv["data"]["time"] = time_24
+        conv["step"] = "student"
+        send_message(chat_id, f"Got it — {time_24}. ✅\n\n👨‍🎓 What is the student's name?", with_keyboard=False)
+        return True
+
+    if step == "student":
+        student = text.strip()
+        if not student:
+            send_message(chat_id, "⚠️ Please enter a student name.", with_keyboard=False)
+            return True
+        conv["data"]["student"] = student
+        conv["step"] = "grade"
+        send_message(chat_id, f"Got it — {student}. ✅\n\n🎓 What grade is the student in?\n(e.g. 'Grade 7')", with_keyboard=False)
+        return True
+
+    if step == "grade":
+        grade = text.strip()
+        d = conv["data"]
+        ok, info = add_session_to_firestore(d["day"], d["time"], d["student"], "Math", grade, d["weekStart"])
+        del state["conversations"][key]
+
+        if ok:
+            send_message(
+                chat_id,
+                "✅ Math class added!\n\n"
+                f"👨‍🎓 Student: {d['student']}\n"
+                f"📘 Subject: Math\n"
+                f"🎓 Grade: {grade}\n"
+                f"📅 {d['day']} ({d['weekStart']})\n"
+                f"🕕 Time: {d['time']}"
+            )
+        else:
+            print(f"Firestore write failed: {info}")
+            send_message(chat_id, "❌ Couldn't save to the website (permission issue on the database). Let your admin check Firestore security rules.")
+        return True
+
+    return False
 
 
 def cmd_addclass(chat_id, raw_text):
@@ -284,7 +440,7 @@ def cmd_addclass(chat_id, raw_text):
         send_message(chat_id, "❌ Couldn't save to the website (permission issue on the database). Let your admin check Firestore security rules.")
 
 
-def handle_command(cmd, chat_id, sessions, raw_text=""):
+def handle_command(cmd, chat_id, sessions, state, raw_text=""):
     now = datetime.now(DISPLAY_TIMEZONE)
 
     if cmd == "/start":
@@ -296,7 +452,7 @@ def handle_command(cmd, chat_id, sessions, raw_text=""):
             "/thisweek — this week's schedule\n"
             "/nextweek — next week's schedule\n"
             "/next — your next class\n"
-            "/addclass — add a new class\n"
+            "/addclass — add a new class (I'll ask you step by step)\n"
             "/help — full usage guide\n\n"
             "I'll also remind you automatically 15 minutes before each class."
         )
@@ -359,7 +515,8 @@ def handle_command(cmd, chat_id, sessions, raw_text=""):
             "📆 Tomorrow — tomorrow's classes\n"
             "🗓️ This Week — this week's full schedule\n"
             "📆 Next Week — next week's full schedule\n"
-            "⏭️ Next Class — your very next upcoming class\n\n"
+            "⏭️ Next Class — your very next upcoming class\n"
+            "➕ Add Math Class — add a new class step by step\n\n"
             "⌨️ Commands (type manually):\n"
             "/today\n"
             "/tomorrow\n"
@@ -367,7 +524,11 @@ def handle_command(cmd, chat_id, sessions, raw_text=""):
             "/nextweek\n"
             "/next\n"
             "/addclass — add a new class to the schedule\n\n"
-            "➕ Adding a class:\n"
+            "➕ Adding a class (easy way):\n"
+            "Just tap '➕ Add Math Class' or type /addclass with nothing else. "
+            "I'll ask you the day/date, time, student name, and grade one at a time. "
+            "Subject is always Math. Type /cancel anytime to stop.\n\n"
+            "➕ Adding a class (quick way, one line):\n"
             "/addclass Day HH:MM Student | Subject | Grade\n\n"
             "Example:\n"
             "/addclass Monday 18:00 Sophia | Math | Grade 7\n\n"
@@ -380,7 +541,11 @@ def handle_command(cmd, chat_id, sessions, raw_text=""):
         )
 
     elif cmd == "/addclass":
-        cmd_addclass(chat_id, raw_text)
+        args = raw_text[len("/addclass"):].strip()
+        if not args:
+            start_addclass_wizard(chat_id, state)
+        else:
+            cmd_addclass(chat_id, raw_text)
 
 
 def poll_commands(state, sessions):
@@ -400,13 +565,17 @@ def poll_commands(state, sessions):
         text = msg["text"].strip()
         chat_id = msg["chat"]["id"]
 
+        # اگه وسط یه گفتگوی چندمرحله‌ایه (مثل add class)، جواب رو به همون بده
+        if process_wizard_message(chat_id, text, state):
+            continue
+
         # اول چک کن آیا متن یکی از دکمه‌هاست
         cmd = BUTTON_LABELS.get(text)
         if cmd is None:
             cmd = text.split()[0].lower()
 
         if cmd in KNOWN_COMMANDS:
-            handle_command(cmd, chat_id, sessions, raw_text=text)
+            handle_command(cmd, chat_id, sessions, state, raw_text=text)
 
 
 # ===================== یادآوری خودکار =====================
